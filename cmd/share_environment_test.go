@@ -334,7 +334,7 @@ func TestShareUnshareDocument_EnvironmentDryRun(t *testing.T) {
 			t.Run(c.Parent().Name()+" "+mode, func(t *testing.T) {
 				s, srv := newEnvShareServer(t)
 				setupDocumentCmdTest(t, srv.URL, config.SafetyLevelReadWriteAll)
-				dryRun = true
+				gFlags.dryRun = true
 
 				stdout, _, err := runShareCmd(t, c, map[string]string{"environment": mode})
 				if err != nil {

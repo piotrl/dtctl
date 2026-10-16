@@ -1,8 +1,10 @@
 package cmd
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -98,17 +100,26 @@ type environmentVisibilityResult struct {
 }
 
 // shareCmd represents the share command
-var shareCmd = &cobra.Command{
-	Use:   "share",
-	Short: "Share documents with users, groups, or the environment",
-	Long:  `Share documents (dashboards, notebooks, launchpads, ...) with specific users or groups, or with everyone in the environment.`,
+var shareCmd = newShareCmd()
+
+func newShareCmd() *cobra.Command {
+	c := &cobra.Command{
+		Use:   "share",
+		Short: "Share documents with users, groups, or the environment",
+		Long:  `Share documents (dashboards, notebooks, launchpads, ...) with specific users or groups, or with everyone in the environment.`,
+	}
+	stability.MarkStable(c)
+	return c
 }
 
 // shareDocumentCmd shares a document with users/groups or the environment
-var shareDocumentCmd = &cobra.Command{
-	Use:   "document <document-id> --user <user-id> | --group <group-id> | --environment link,public",
-	Short: "Share a document with users, groups, or the environment",
-	Long: `Share a document of any type with specific users or groups, or with
+var shareDocumentCmd = newShareDocumentCmd()
+
+func newShareDocumentCmd() *cobra.Command {
+	c := &cobra.Command{
+		Use:   "document <document-id> --user <user-id> | --group <group-id> | --environment link,public",
+		Short: "Share a document with users, groups, or the environment",
+		Long: `Share a document of any type with specific users or groups, or with
 everyone in the environment.
 
 --environment opens the document to everyone in the environment, in two
@@ -160,141 +171,341 @@ Examples:
   # Both: make it public and print a link that grants write access
   dtctl share document my-launchpad-id --environment link,public --access read-write
 `,
-	Aliases: []string{"doc"},
-	Args:    cobra.ExactArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		documentID := args[0]
-		users, _ := cmd.Flags().GetStringArray("user")
-		groups, _ := cmd.Flags().GetStringArray("group")
-		access, _ := cmd.Flags().GetString("access")
-		noNotify, _ := cmd.Flags().GetBool("no-notify")
-		environment, err := parseEnvironmentModes(cmd, "environment")
+		Aliases: []string{"doc"},
+		Args:    cobra.ExactArgs(1),
+		RunE:    runShareDocument,
+	}
+	stability.MarkStable(c)
+	addShareFlags(c)
+	return c
+}
+
+// unshareCmd represents the unshare command
+var unshareCmd = newUnshareCmd()
+
+func newUnshareCmd() *cobra.Command {
+	c := &cobra.Command{
+		Use:   "unshare",
+		Short: "Remove sharing from documents",
+		Long:  `Remove sharing from documents (dashboards, notebooks, launchpads, ...).`,
+	}
+	stability.MarkStable(c)
+	return c
+}
+
+// unshareDocumentCmd removes sharing from a document
+var unshareDocumentCmd = newUnshareDocumentCmd()
+
+func newUnshareDocumentCmd() *cobra.Command {
+	c := &cobra.Command{
+		Use:   "document <document-id> [--user <user-id>] [--group <group-id>] [--all] [--environment link,public]",
+		Short: "Remove sharing from a document",
+		Long: `Remove sharing from a document. Can remove specific users/groups, all
+user/group shares, or what --environment link,public on share created.
+
+--all removes user and group shares only. --environment undoes one or both of
+the two ways a document is opened to the environment, and can be combined
+with the other flags:
+
+  link    Delete the document's environment share(s), so their links stop
+          working. With --access, only shares at exactly that level are
+          deleted. The document's visibility is not changed.
+  public  Mark the document private again (isPrivate=true). Environment
+          shares are not deleted.
+
+Examples:
+  # Remove a specific user from all shares
+  dtctl unshare document my-dashboard-id --user user-sso-id
+
+  # Remove a group from all shares
+  dtctl unshare document my-dashboard-id --group group-sso-id
+
+  # Remove all shares (revoke all access)
+  dtctl unshare document my-dashboard-id --all
+
+  # Remove only read shares
+  dtctl unshare document my-dashboard-id --all --access read
+
+  # Delete the document's environment share link
+  dtctl unshare document my-launchpad-id --environment link
+
+  # Take back write access but keep a read-only link working
+  dtctl unshare document my-launchpad-id --environment link --access read-write
+
+  # Make a public document private again
+  dtctl unshare document my-launchpad-id --environment public
+
+  # Close the document to the environment entirely
+  dtctl unshare document my-launchpad-id --environment link,public
+
+  # Remove every user, group, and environment share
+  dtctl unshare document my-launchpad-id --all --environment link
+`,
+		Aliases: []string{"doc"},
+		Args:    cobra.ExactArgs(1),
+		RunE:    runUnshareDocument,
+	}
+	stability.MarkStable(c)
+	addUnshareFlags(c)
+	return c
+}
+
+// shareNotebookCmd is an alias for sharing notebooks
+var shareNotebookCmd = newShareNotebookCmd()
+
+func newShareNotebookCmd() *cobra.Command {
+	c := &cobra.Command{
+		Use:     "notebook <notebook-id> --user <user-id> | --group <group-id> | --environment link,public",
+		Short:   "Share a notebook with users, groups, or the environment",
+		Aliases: []string{"nb"},
+		Args:    cobra.ExactArgs(1),
+		RunE:    runShareDocument,
+	}
+	stability.MarkStable(c)
+	addShareFlags(c)
+	return c
+}
+
+// shareDashboardCmd is an alias for sharing dashboards
+var shareDashboardCmd = newShareDashboardCmd()
+
+func newShareDashboardCmd() *cobra.Command {
+	c := &cobra.Command{
+		Use:     "dashboard <dashboard-id> --user <user-id> | --group <group-id> | --environment link,public",
+		Short:   "Share a dashboard with users, groups, or the environment",
+		Aliases: []string{"db"},
+		Args:    cobra.ExactArgs(1),
+		RunE:    runShareDocument,
+	}
+	stability.MarkStable(c)
+	addShareFlags(c)
+	return c
+}
+
+// unshareNotebookCmd is an alias for unsharing notebooks
+var unshareNotebookCmd = newUnshareNotebookCmd()
+
+func newUnshareNotebookCmd() *cobra.Command {
+	c := &cobra.Command{
+		Use:     "notebook <notebook-id> [--user <user-id>] [--group <group-id>] [--all] [--environment link,public]",
+		Short:   "Remove sharing from a notebook",
+		Aliases: []string{"nb"},
+		Args:    cobra.ExactArgs(1),
+		RunE:    runUnshareDocument,
+	}
+	stability.MarkStable(c)
+	addUnshareFlags(c)
+	return c
+}
+
+// unshareDashboardCmd is an alias for unsharing dashboards
+var unshareDashboardCmd = newUnshareDashboardCmd()
+
+func newUnshareDashboardCmd() *cobra.Command {
+	c := &cobra.Command{
+		Use:     "dashboard <dashboard-id> [--user <user-id>] [--group <group-id>] [--all] [--environment link,public]",
+		Short:   "Remove sharing from a dashboard",
+		Aliases: []string{"db"},
+		Args:    cobra.ExactArgs(1),
+		RunE:    runUnshareDocument,
+	}
+	stability.MarkStable(c)
+	addUnshareFlags(c)
+	return c
+}
+
+func init() {
+	rootCmd.AddCommand(shareCmd)
+	rootCmd.AddCommand(unshareCmd)
+
+	// Share subcommands
+	shareCmd.AddCommand(shareDocumentCmd)
+	shareCmd.AddCommand(shareNotebookCmd)
+	shareCmd.AddCommand(shareDashboardCmd)
+
+	// Unshare subcommands
+	unshareCmd.AddCommand(unshareDocumentCmd)
+	unshareCmd.AddCommand(unshareNotebookCmd)
+	unshareCmd.AddCommand(unshareDashboardCmd)
+}
+
+// formatRecipients formats recipients for display
+//
+//nolint:unused // Reserved for future share features
+func formatRecipients(recipients []document.SsoEntity) string {
+	var parts []string
+	for _, r := range recipients {
+		parts = append(parts, fmt.Sprintf("%s:%s", r.Type, r.ID))
+	}
+	return strings.Join(parts, ", ")
+}
+
+// Declared stable: the invocation and output contract of these commands is
+// additive-only. Stable is never implied -- see AGENTS.md "Stability Tiers".
+
+// addShareFlags registers the flags every share subcommand takes.
+func addShareFlags(c *cobra.Command) {
+	c.Flags().StringArray("user", []string{}, "SSO user ID to share with (can be specified multiple times)")
+	c.Flags().StringArray("group", []string{}, "SSO group ID to share with (can be specified multiple times)")
+	c.Flags().String("access", "read", "access level: 'read' or 'read-write'")
+	c.Flags().Bool("no-notify", false, "do not notify recipients of the share (a group recipient notifies every member)")
+	c.Flags().StringSlice("environment", nil, "open the document to everyone in the environment: 'link' (an environment share link, at --access), 'public' (isPrivate=false, read access), or both ('link,public'); cannot be combined with --user/--group")
+	stability.MarkFlag(c, "no-notify", stability.Experimental, "0.40.0")
+	stability.MarkFlag(c, "environment", stability.Experimental, "0.42.0")
+	// A blank recipient would be sent to the API as an empty SSO ID.
+	rejectEmptyFlag(c, "user")
+	rejectEmptyFlag(c, "group")
+}
+
+// addUnshareFlags registers the flags every unshare subcommand takes.
+func addUnshareFlags(c *cobra.Command) {
+	c.Flags().StringArray("user", []string{}, "SSO user ID to remove (can be specified multiple times)")
+	c.Flags().StringArray("group", []string{}, "SSO group ID to remove (can be specified multiple times)")
+	c.Flags().Bool("all", false, "remove all user and group shares (add --environment link to delete the environment share too)")
+	c.Flags().String("access", "", "filter by access level: 'read' or 'read-write'")
+	c.Flags().StringSlice("environment", nil, "'link' deletes the environment share(s) (filtered by --access), 'public' makes the document private again; 'link,public' does both")
+	stability.MarkFlag(c, "environment", stability.Experimental, "0.42.0")
+	rejectEmptyFlag(c, "user")
+	rejectEmptyFlag(c, "group")
+}
+
+// runShareDocument is the shared body of share document|notebook|dashboard.
+// A named function rather than the document command's RunE value, so each
+// alias on a per-invocation tree runs its own copy, not the singleton's
+// (possibly wrapped) one.
+func runShareDocument(cmd *cobra.Command, args []string) error {
+	ctx := cmdContext(cmd)
+	documentID := args[0]
+	users, _ := cmd.Flags().GetStringArray("user")
+	groups, _ := cmd.Flags().GetStringArray("group")
+	access, _ := cmd.Flags().GetString("access")
+	noNotify, _ := cmd.Flags().GetBool("no-notify")
+	environment, err := parseEnvironmentModes(cmd, "environment")
+	if err != nil {
+		return err
+	}
+
+	if !environment.none() {
+		if len(users) > 0 || len(groups) > 0 {
+			return fmt.Errorf("--environment cannot be combined with --user or --group")
+		}
+		if noNotify {
+			return fmt.Errorf("--no-notify applies to --user/--group shares only, not to --environment")
+		}
+		if !environment.link && cmd.Flags().Changed("access") {
+			return fmt.Errorf("--access does not apply to --environment public, which grants read access; " +
+				"use --environment link --access read-write for a link with write access")
+		}
+	} else if len(users) == 0 && len(groups) == 0 {
+		return fmt.Errorf("at least one --user, --group, or --environment link,public is required")
+	}
+
+	// Validate access level
+	if access != "read" && access != "read-write" {
+		return fmt.Errorf("invalid access level %q, must be 'read' or 'read-write'", access)
+	}
+
+	if !environment.none() && dryRun(ctx) {
+		report := newDryRunReport(cmd).
+			Detail("document", "%s", documentID).
+			Detail("environment", "%s", environment)
+		if environment.link {
+			report.
+				Linef("Dry run: would create an environment share link for document %q (%s access)", documentID, access).
+				Detail("access", "%s", access)
+		}
+		if environment.public {
+			report.Linef("Dry run: would make document %q public to everyone in the environment", documentID)
+		}
+		return report.Print()
+	}
+
+	// Build recipients list
+	var recipients []document.SsoEntity
+	for _, u := range users {
+		recipients = append(recipients, document.SsoEntity{ID: u, Type: "user"})
+	}
+	for _, g := range groups {
+		recipients = append(recipients, document.SsoEntity{ID: g, Type: "group"})
+	}
+
+	if dryRun(ctx) {
+		report := newDryRunReport(cmd).
+			Linef("Dry run: would share document %q with %d recipient(s) (%s access)",
+				documentID, len(recipients), access).
+			Detail("document", "%s", documentID).
+			Detail("access", "%s", access).
+			Detail("recipients", "%d", len(recipients)).
+			Detail("notify", "%t", !noNotify)
+		for _, r := range recipients {
+			report.Linef("  - %s: %s", r.Type, r.ID)
+		}
+		return report.Print()
+	}
+
+	cfg, c, err := setupClient(ctx)
+	if err != nil {
+		return err
+	}
+
+	handler := document.NewHandler(c)
+
+	// Get document metadata for ownership check
+	metadata, err := handler.GetMetadata(documentID)
+	if err != nil {
+		return err
+	}
+
+	// Safety check with actual ownership - sharing modifies document permissions
+	currentUserID, _ := c.CurrentUserID()
+	ownership := safety.DetermineOwnership(metadata.Owner, currentUserID)
+	if err := checkSafety(ctx, cfg, safety.OperationUpdate, ownership); err != nil {
+		return err
+	}
+
+	if !environment.none() {
+		return shareWithEnvironment(cmd, cfg, handler, c.BaseURL(), documentID, access, environment)
+	}
+
+	// Check if a share already exists for this document with the same access level
+	shares, err := handler.ListDirectShares(documentID)
+	if err != nil {
+		return fmt.Errorf("failed to check existing shares: %w", err)
+	}
+
+	var existingShare *document.DirectShare
+	for _, s := range shares.Shares {
+		if s.ExactAccess(access) {
+			existingShare = &s
+			break
+		}
+	}
+
+	if existingShare != nil {
+		// Add recipients to existing share
+		err = handler.AddDirectShareRecipientsWithOptions(existingShare.ID, recipients,
+			document.AddDirectShareRecipientsOptions{SuppressNotification: noNotify})
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to add recipients to share: %w", err)
 		}
-
-		if !environment.none() {
-			if len(users) > 0 || len(groups) > 0 {
-				return fmt.Errorf("--environment cannot be combined with --user or --group")
-			}
-			if noNotify {
-				return fmt.Errorf("--no-notify applies to --user/--group shares only, not to --environment")
-			}
-			if !environment.link && cmd.Flags().Changed("access") {
-				return fmt.Errorf("--access does not apply to --environment public, which grants read access; " +
-					"use --environment link --access read-write for a link with write access")
-			}
-		} else if len(users) == 0 && len(groups) == 0 {
-			return fmt.Errorf("at least one --user, --group, or --environment link,public is required")
-		}
-
-		// Validate access level
-		if access != "read" && access != "read-write" {
-			return fmt.Errorf("invalid access level %q, must be 'read' or 'read-write'", access)
-		}
-
-		if !environment.none() && dryRun {
-			report := newDryRunReport(cmd).
-				Detail("document", "%s", documentID).
-				Detail("environment", "%s", environment)
-			if environment.link {
-				report.
-					Linef("Dry run: would create an environment share link for document %q (%s access)", documentID, access).
-					Detail("access", "%s", access)
-			}
-			if environment.public {
-				report.Linef("Dry run: would make document %q public to everyone in the environment", documentID)
-			}
-			return report.Print()
-		}
-
-		// Build recipients list
-		var recipients []document.SsoEntity
-		for _, u := range users {
-			recipients = append(recipients, document.SsoEntity{ID: u, Type: "user"})
-		}
-		for _, g := range groups {
-			recipients = append(recipients, document.SsoEntity{ID: g, Type: "group"})
-		}
-
-		if dryRun {
-			report := newDryRunReport(cmd).
-				Linef("Dry run: would share document %q with %d recipient(s) (%s access)",
-					documentID, len(recipients), access).
-				Detail("document", "%s", documentID).
-				Detail("access", "%s", access).
-				Detail("recipients", "%d", len(recipients)).
-				Detail("notify", "%t", !noNotify)
-			for _, r := range recipients {
-				report.Linef("  - %s: %s", r.Type, r.ID)
-			}
-			return report.Print()
-		}
-
-		cfg, c, err := SetupClient()
+		output.FprintSuccess(currentStderr(ctx), "Added %d recipient(s) to existing %s share for document %q",
+			len(recipients), access, documentID)
+	} else {
+		// Create new share
+		share, err := handler.CreateDirectShare(document.CreateDirectShareRequest{
+			DocumentID:           documentID,
+			Access:               access,
+			Recipients:           recipients,
+			SuppressNotification: noNotify,
+		})
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to create share: %w", err)
 		}
+		output.FprintSuccess(currentStderr(ctx), "Created %s share (%s) for document %q with %d recipient(s)",
+			access, share.ID, documentID, len(recipients))
+	}
 
-		handler := document.NewHandler(c)
-
-		// Get document metadata for ownership check
-		metadata, err := handler.GetMetadata(documentID)
-		if err != nil {
-			return err
-		}
-
-		// Safety check with actual ownership - sharing modifies document permissions
-		currentUserID, _ := c.CurrentUserID()
-		ownership := safety.DetermineOwnership(metadata.Owner, currentUserID)
-		if err := CheckSafety(cfg, safety.OperationUpdate, ownership); err != nil {
-			return err
-		}
-
-		if !environment.none() {
-			return shareWithEnvironment(cmd, cfg, handler, c.BaseURL(), documentID, access, environment)
-		}
-
-		// Check if a share already exists for this document with the same access level
-		shares, err := handler.ListDirectShares(documentID)
-		if err != nil {
-			return fmt.Errorf("failed to check existing shares: %w", err)
-		}
-
-		var existingShare *document.DirectShare
-		for _, s := range shares.Shares {
-			if s.ExactAccess(access) {
-				existingShare = &s
-				break
-			}
-		}
-
-		if existingShare != nil {
-			// Add recipients to existing share
-			err = handler.AddDirectShareRecipientsWithOptions(existingShare.ID, recipients,
-				document.AddDirectShareRecipientsOptions{SuppressNotification: noNotify})
-			if err != nil {
-				return fmt.Errorf("failed to add recipients to share: %w", err)
-			}
-			output.PrintSuccess("Added %d recipient(s) to existing %s share for document %q",
-				len(recipients), access, documentID)
-		} else {
-			// Create new share
-			share, err := handler.CreateDirectShare(document.CreateDirectShareRequest{
-				DocumentID:           documentID,
-				Access:               access,
-				Recipients:           recipients,
-				SuppressNotification: noNotify,
-			})
-			if err != nil {
-				return fmt.Errorf("failed to create share: %w", err)
-			}
-			output.PrintSuccess("Created %s share (%s) for document %q with %d recipient(s)",
-				access, share.ID, documentID, len(recipients))
-		}
-
-		return nil
-	},
+	return nil
 }
 
 // shareWithEnvironment opens the document to the environment in the given
@@ -303,6 +514,7 @@ Examples:
 // can be captured, or into the result in agent mode.
 func shareWithEnvironment(cmd *cobra.Command, cfg *config.Config, handler *document.Handler, baseURL, documentID,
 	access string, modes environmentModes) error {
+	ctx := cmdContext(cmd)
 	result := environmentShareResult{DocumentID: documentID}
 	var warnings []string
 
@@ -338,30 +550,31 @@ func shareWithEnvironment(cmd *cobra.Command, cfg *config.Config, handler *docum
 		result.Visibility = &environmentVisibilityResult{Public: true, Changed: changed}
 	}
 
-	printer := NewPrinter()
+	printer := newPrinterCtx(ctx)
 	if ap := enrichAgent(printer, "share", cmd.Name()); ap != nil {
 		ap.SetWarnings(warnings)
 		return printer.Print(result)
 	}
+	stderr := currentStderr(ctx)
 	for _, w := range warnings {
-		output.PrintWarning("%s", w)
+		output.FprintWarning(stderr, "%s", w)
 	}
 	if l := result.Link; l != nil {
 		if l.Created {
-			output.PrintSuccess("Created %s environment share %s for document %q", l.Access, l.ShareID, documentID)
+			output.FprintSuccess(stderr, "Created %s environment share %s for document %q", l.Access, l.ShareID, documentID)
 		} else {
-			output.PrintSuccess("Document %q already has a %s environment share (%s)", documentID, l.Access, l.ShareID)
+			output.FprintSuccess(stderr, "Document %q already has a %s environment share (%s)", documentID, l.Access, l.ShareID)
 		}
 	}
 	if v := result.Visibility; v != nil {
 		if v.Changed {
-			output.PrintSuccess("Document %q is now public: everyone in the environment can find and read it", documentID)
+			output.FprintSuccess(stderr, "Document %q is now public: everyone in the environment can find and read it", documentID)
 		} else {
-			output.PrintSuccess("Document %q is already public", documentID)
+			output.FprintSuccess(stderr, "Document %q is already public", documentID)
 		}
 	}
 	if result.Link != nil {
-		fmt.Println(result.Link.URL)
+		fmt.Fprintln(currentStdout(ctx), result.Link.URL)
 	}
 	return nil
 }
@@ -420,319 +633,166 @@ func environmentShareScopeError(err error, cfg *config.Config, operation string,
 	}
 }
 
-// unshareCmd represents the unshare command
-var unshareCmd = &cobra.Command{
-	Use:   "unshare",
-	Short: "Remove sharing from documents",
-	Long:  `Remove sharing from documents (dashboards, notebooks, launchpads, ...).`,
-}
+// runUnshareDocument is the shared body of unshare document|notebook|dashboard.
+func runUnshareDocument(cmd *cobra.Command, args []string) error {
+	ctx := cmdContext(cmd)
+	documentID := args[0]
+	users, _ := cmd.Flags().GetStringArray("user")
+	groups, _ := cmd.Flags().GetStringArray("group")
+	all, _ := cmd.Flags().GetBool("all")
+	access, _ := cmd.Flags().GetString("access")
+	direct := all || len(users) > 0 || len(groups) > 0
+	environment, err := parseEnvironmentModes(cmd, "environment")
+	if err != nil {
+		return err
+	}
 
-// unshareDocumentCmd removes sharing from a document
-var unshareDocumentCmd = &cobra.Command{
-	Use:   "document <document-id> [--user <user-id>] [--group <group-id>] [--all] [--environment link,public]",
-	Short: "Remove sharing from a document",
-	Long: `Remove sharing from a document. Can remove specific users/groups, all
-user/group shares, or what --environment link,public on share created.
+	if !direct && environment.none() {
+		return fmt.Errorf("specify --user, --group, --all, or --environment link,public")
+	}
+	// An unrecognized level would otherwise be matched as 'read'.
+	if access != "" && access != "read" && access != "read-write" {
+		return fmt.Errorf("invalid access level %q, must be 'read' or 'read-write'", access)
+	}
+	// --access filters shares, and --environment public removes none.
+	if !environment.link && environment.public && access != "" && !direct {
+		return fmt.Errorf("--access does not apply to --environment public, which deletes no share")
+	}
 
---all removes user and group shares only. --environment undoes one or both of
-the two ways a document is opened to the environment, and can be combined
-with the other flags:
-
-  link    Delete the document's environment share(s), so their links stop
-          working. With --access, only shares at exactly that level are
-          deleted. The document's visibility is not changed.
-  public  Mark the document private again (isPrivate=true). Environment
-          shares are not deleted.
-
-Examples:
-  # Remove a specific user from all shares
-  dtctl unshare document my-dashboard-id --user user-sso-id
-
-  # Remove a group from all shares
-  dtctl unshare document my-dashboard-id --group group-sso-id
-
-  # Remove all shares (revoke all access)
-  dtctl unshare document my-dashboard-id --all
-
-  # Remove only read shares
-  dtctl unshare document my-dashboard-id --all --access read
-
-  # Delete the document's environment share link
-  dtctl unshare document my-launchpad-id --environment link
-
-  # Take back write access but keep a read-only link working
-  dtctl unshare document my-launchpad-id --environment link --access read-write
-
-  # Make a public document private again
-  dtctl unshare document my-launchpad-id --environment public
-
-  # Close the document to the environment entirely
-  dtctl unshare document my-launchpad-id --environment link,public
-
-  # Remove every user, group, and environment share
-  dtctl unshare document my-launchpad-id --all --environment link
-`,
-	Aliases: []string{"doc"},
-	Args:    cobra.ExactArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		documentID := args[0]
-		users, _ := cmd.Flags().GetStringArray("user")
-		groups, _ := cmd.Flags().GetStringArray("group")
-		all, _ := cmd.Flags().GetBool("all")
-		access, _ := cmd.Flags().GetString("access")
-		direct := all || len(users) > 0 || len(groups) > 0
-		environment, err := parseEnvironmentModes(cmd, "environment")
-		if err != nil {
-			return err
+	if dryRun(ctx) {
+		report := newDryRunReport(cmd).Detail("document", "%s", documentID)
+		if all {
+			report.Linef("Dry run: would remove all shares from document %q", documentID)
+		} else if direct {
+			report.
+				Linef("Dry run: would remove %d user(s) and %d group(s) from document %q shares",
+					len(users), len(groups), documentID).
+				Detail("users", "%d", len(users)).
+				Detail("groups", "%d", len(groups))
 		}
-
-		if !direct && environment.none() {
-			return fmt.Errorf("specify --user, --group, --all, or --environment link,public")
+		if !environment.none() {
+			report.Detail("environment", "%s", environment)
 		}
-		// An unrecognized level would otherwise be matched as 'read'.
-		if access != "" && access != "read" && access != "read-write" {
-			return fmt.Errorf("invalid access level %q, must be 'read' or 'read-write'", access)
-		}
-		// --access filters shares, and --environment public removes none.
-		if !environment.link && environment.public && access != "" && !direct {
-			return fmt.Errorf("--access does not apply to --environment public, which deletes no share")
-		}
-
-		if dryRun {
-			report := newDryRunReport(cmd).Detail("document", "%s", documentID)
-			if all {
-				report.Linef("Dry run: would remove all shares from document %q", documentID)
-			} else if direct {
-				report.
-					Linef("Dry run: would remove %d user(s) and %d group(s) from document %q shares",
-						len(users), len(groups), documentID).
-					Detail("users", "%d", len(users)).
-					Detail("groups", "%d", len(groups))
-			}
-			if !environment.none() {
-				report.Detail("environment", "%s", environment)
-			}
-			if environment.public {
-				report.Linef("Dry run: would make document %q private", documentID)
-			}
-			if environment.link {
-				which := "all environment shares"
-				if access != "" {
-					which = access + " environment shares"
-				}
-				report.Linef("Dry run: would delete %s of document %q", which, documentID)
-			}
-			return report.Print()
-		}
-
-		cfg, c, err := SetupClient()
-		if err != nil {
-			return err
-		}
-
-		handler := document.NewHandler(c)
-
-		// Get document metadata for ownership check
-		metadata, err := handler.GetMetadata(documentID)
-		if err != nil {
-			return err
-		}
-
-		// Safety check with actual ownership - unsharing modifies document permissions
-		currentUserID, _ := c.CurrentUserID()
-		ownership := safety.DetermineOwnership(metadata.Owner, currentUserID)
-		if err := CheckSafety(cfg, safety.OperationUpdate, ownership); err != nil {
-			return err
-		}
-
-		// Private first: isPrivate=false lets everyone read the document, a
-		// link only those who claim it, so a failure partway leaves the
-		// narrower of the two.
 		if environment.public {
-			changed, err := handler.SetPrivate(documentID, true)
-			if err != nil {
-				return fmt.Errorf("failed to make document %q private: %w", documentID, err)
-			}
-			if changed {
-				output.PrintSuccess("Document %q is private again", documentID)
-			} else {
-				fmt.Printf("Document %q is already private\n", documentID)
-			}
+			report.Linef("Dry run: would make document %q private", documentID)
 		}
 		if environment.link {
-			deleted, err := handler.RemoveEnvironmentLinks(documentID, access)
-			if err != nil {
-				return environmentShareScopeError(err, cfg,
-					fmt.Sprintf("delete the environment share of document %q", documentID), environmentShareDeleteScopes)
+			which := "all environment shares"
+			if access != "" {
+				which = access + " environment shares"
 			}
-			switch {
-			case deleted > 0:
-				output.PrintSuccess("Deleted %d environment share(s) from document %q; links to them no longer work",
-					deleted, documentID)
-			case access != "":
-				fmt.Printf("No %s environment share found for document %q, nothing changed\n", access, documentID)
-			default:
-				fmt.Printf("Document %q has no environment share, nothing changed\n", documentID)
-			}
+			report.Linef("Dry run: would delete %s of document %q", which, documentID)
 		}
-		if !direct {
-			return nil
-		}
+		return report.Print()
+	}
 
-		// Get existing shares for this document
-		shares, err := handler.ListDirectShares(documentID)
-		if err != nil {
-			return fmt.Errorf("failed to list shares: %w", err)
-		}
+	cfg, c, err := setupClient(ctx)
+	if err != nil {
+		return err
+	}
 
-		if len(shares.Shares) == 0 {
-			fmt.Printf("No user or group shares found for document %q\n", documentID)
-			return nil
-		}
+	handler := document.NewHandler(c)
 
-		if all {
-			// Delete all shares (optionally filtered by access level)
-			deleted := 0
-			for _, share := range shares.Shares {
-				if access != "" && !share.ExactAccess(access) {
-					continue
-				}
-				if err := handler.DeleteDirectShare(share.ID); err != nil {
-					return fmt.Errorf("failed to delete share %s: %w", share.ID, err)
-				}
-				deleted++
-			}
-			output.PrintSuccess("Deleted %d share(s) from document %q", deleted, documentID)
-		} else {
-			// Remove specific recipients from all shares
-			recipientIDs := append(users, groups...)
-			removed := 0
-			for _, share := range shares.Shares {
-				if access != "" && !share.ExactAccess(access) {
-					continue
-				}
-				if err := handler.RemoveDirectShareRecipients(share.ID, recipientIDs); err != nil {
-					// Log but continue - recipient might not be in this share
-					if verbosity > 0 {
-						output.PrintInfo("Note: could not remove from share %s: %v", share.ID, err)
-					}
-					continue
-				}
-				removed++
-			}
-			output.PrintSuccess("Removed %d recipient(s) from %d share(s) of document %q",
-				len(recipientIDs), removed, documentID)
-		}
+	// Get document metadata for ownership check
+	metadata, err := handler.GetMetadata(documentID)
+	if err != nil {
+		return err
+	}
 
+	// Safety check with actual ownership - unsharing modifies document permissions
+	currentUserID, _ := c.CurrentUserID()
+	ownership := safety.DetermineOwnership(metadata.Owner, currentUserID)
+	if err := checkSafety(ctx, cfg, safety.OperationUpdate, ownership); err != nil {
+		return err
+	}
+
+	if err := unshareFromEnvironment(ctx, cfg, handler, documentID, access, environment); err != nil {
+		return err
+	}
+	if !direct {
 		return nil
-	},
-}
-
-// shareNotebookCmd is an alias for sharing notebooks
-var shareNotebookCmd = &cobra.Command{
-	Use:     "notebook <notebook-id> --user <user-id> | --group <group-id> | --environment link,public",
-	Short:   "Share a notebook with users, groups, or the environment",
-	Aliases: []string{"nb"},
-	Args:    cobra.ExactArgs(1),
-	RunE:    shareDocumentCmd.RunE,
-}
-
-// shareDashboardCmd is an alias for sharing dashboards
-var shareDashboardCmd = &cobra.Command{
-	Use:     "dashboard <dashboard-id> --user <user-id> | --group <group-id> | --environment link,public",
-	Short:   "Share a dashboard with users, groups, or the environment",
-	Aliases: []string{"db"},
-	Args:    cobra.ExactArgs(1),
-	RunE:    shareDocumentCmd.RunE,
-}
-
-// unshareNotebookCmd is an alias for unsharing notebooks
-var unshareNotebookCmd = &cobra.Command{
-	Use:     "notebook <notebook-id> [--user <user-id>] [--group <group-id>] [--all] [--environment link,public]",
-	Short:   "Remove sharing from a notebook",
-	Aliases: []string{"nb"},
-	Args:    cobra.ExactArgs(1),
-	RunE:    unshareDocumentCmd.RunE,
-}
-
-// unshareDashboardCmd is an alias for unsharing dashboards
-var unshareDashboardCmd = &cobra.Command{
-	Use:     "dashboard <dashboard-id> [--user <user-id>] [--group <group-id>] [--all] [--environment link,public]",
-	Short:   "Remove sharing from a dashboard",
-	Aliases: []string{"db"},
-	Args:    cobra.ExactArgs(1),
-	RunE:    unshareDocumentCmd.RunE,
-}
-
-func init() {
-	rootCmd.AddCommand(shareCmd)
-	rootCmd.AddCommand(unshareCmd)
-
-	// Share subcommands
-	shareCmd.AddCommand(shareDocumentCmd)
-	shareCmd.AddCommand(shareNotebookCmd)
-	shareCmd.AddCommand(shareDashboardCmd)
-
-	// Unshare subcommands
-	unshareCmd.AddCommand(unshareDocumentCmd)
-	unshareCmd.AddCommand(unshareNotebookCmd)
-	unshareCmd.AddCommand(unshareDashboardCmd)
-
-	// Share flags (apply to all share subcommands)
-	for _, cmd := range []*cobra.Command{shareDocumentCmd, shareNotebookCmd, shareDashboardCmd} {
-		cmd.Flags().StringArray("user", []string{}, "SSO user ID to share with (can be specified multiple times)")
-		cmd.Flags().StringArray("group", []string{}, "SSO group ID to share with (can be specified multiple times)")
-		cmd.Flags().String("access", "read", "access level: 'read' or 'read-write'")
-		cmd.Flags().Bool("no-notify", false, "do not notify recipients of the share (a group recipient notifies every member)")
-		cmd.Flags().StringSlice("environment", nil, "open the document to everyone in the environment: 'link' (an environment share link, at --access), 'public' (isPrivate=false, read access), or both ('link,public'); cannot be combined with --user/--group")
-		// A blank recipient would be sent to the API as an empty SSO ID.
-		rejectEmptyFlag(cmd, "user")
-		rejectEmptyFlag(cmd, "group")
 	}
 
-	// Unshare flags (apply to all unshare subcommands)
-	for _, cmd := range []*cobra.Command{unshareDocumentCmd, unshareNotebookCmd, unshareDashboardCmd} {
-		cmd.Flags().StringArray("user", []string{}, "SSO user ID to remove (can be specified multiple times)")
-		cmd.Flags().StringArray("group", []string{}, "SSO group ID to remove (can be specified multiple times)")
-		cmd.Flags().Bool("all", false, "remove all user and group shares (add --environment link to delete the environment share too)")
-		cmd.Flags().String("access", "", "filter by access level: 'read' or 'read-write'")
-		cmd.Flags().StringSlice("environment", nil, "'link' deletes the environment share(s) (filtered by --access), 'public' makes the document private again; 'link,public' does both")
-		rejectEmptyFlag(cmd, "user")
-		rejectEmptyFlag(cmd, "group")
+	// Get existing shares for this document
+	shares, err := handler.ListDirectShares(documentID)
+	if err != nil {
+		return fmt.Errorf("failed to list shares: %w", err)
 	}
+
+	if len(shares.Shares) == 0 {
+		fmt.Fprintf(currentStdout(ctx), "No user or group shares found for document %q\n", documentID)
+		return nil
+	}
+
+	if all {
+		// Delete all shares (optionally filtered by access level)
+		deleted := 0
+		for _, share := range shares.Shares {
+			if access != "" && !share.ExactAccess(access) {
+				continue
+			}
+			if err := handler.DeleteDirectShare(share.ID); err != nil {
+				return fmt.Errorf("failed to delete share %s: %w", share.ID, err)
+			}
+			deleted++
+		}
+		output.FprintSuccess(currentStderr(ctx), "Deleted %d share(s) from document %q", deleted, documentID)
+	} else {
+		// Remove specific recipients from all shares
+		recipientIDs := slices.Concat(users, groups)
+		removed := 0
+		for _, share := range shares.Shares {
+			if access != "" && !share.ExactAccess(access) {
+				continue
+			}
+			if err := handler.RemoveDirectShareRecipients(share.ID, recipientIDs); err != nil {
+				// Log but continue - recipient might not be in this share
+				if verbosity(ctx) > 0 {
+					output.FprintInfo(currentStderr(ctx), "Note: could not remove from share %s: %v", share.ID, err)
+				}
+				continue
+			}
+			removed++
+		}
+		output.FprintSuccess(currentStderr(ctx), "Removed %d recipient(s) from %d share(s) of document %q",
+			len(recipientIDs), removed, documentID)
+	}
+
+	return nil
 }
 
-// formatRecipients formats recipients for display
-//
-//nolint:unused // Reserved for future share features
-func formatRecipients(recipients []document.SsoEntity) string {
-	var parts []string
-	for _, r := range recipients {
-		parts = append(parts, fmt.Sprintf("%s:%s", r.Type, r.ID))
+// unshareFromEnvironment undoes the given --environment modes. Private first:
+// isPrivate=false lets everyone read the document, a link only those who claim
+// it, so a failure partway leaves the narrower of the two.
+func unshareFromEnvironment(ctx context.Context, cfg *config.Config, handler *document.Handler, documentID, access string,
+	modes environmentModes) error {
+	stdout, stderr := currentStdout(ctx), currentStderr(ctx)
+	if modes.public {
+		changed, err := handler.SetPrivate(documentID, true)
+		if err != nil {
+			return fmt.Errorf("failed to make document %q private: %w", documentID, err)
+		}
+		if changed {
+			output.FprintSuccess(stderr, "Document %q is private again", documentID)
+		} else {
+			fmt.Fprintf(stdout, "Document %q is already private\n", documentID)
+		}
 	}
-	return strings.Join(parts, ", ")
-}
-
-// Declared stable: the invocation and output contract of these commands is
-// additive-only. Stable is never implied -- see AGENTS.md "Stability Tiers".
-func init() {
-	stability.MarkStable(shareCmd)
-	stability.MarkStable(shareDashboardCmd)
-	stability.MarkStable(shareDocumentCmd)
-	stability.MarkStable(shareNotebookCmd)
-	stability.MarkStable(unshareCmd)
-	stability.MarkStable(unshareDashboardCmd)
-	stability.MarkStable(unshareDocumentCmd)
-	stability.MarkStable(unshareNotebookCmd)
-
-	for _, cmd := range []*cobra.Command{shareDocumentCmd, shareNotebookCmd, shareDashboardCmd} {
-		stability.MarkFlag(cmd, "no-notify", stability.Experimental, "0.40.0")
-		stability.MarkFlag(cmd, "environment", stability.Experimental, "0.42.0")
+	if modes.link {
+		deleted, err := handler.RemoveEnvironmentLinks(documentID, access)
+		if err != nil {
+			return environmentShareScopeError(err, cfg,
+				fmt.Sprintf("delete the environment share of document %q", documentID), environmentShareDeleteScopes)
+		}
+		switch {
+		case deleted > 0:
+			output.FprintSuccess(stderr, "Deleted %d environment share(s) from document %q; links to them no longer work",
+				deleted, documentID)
+		case access != "":
+			fmt.Fprintf(stdout, "No %s environment share found for document %q, nothing changed\n", access, documentID)
+		default:
+			fmt.Fprintf(stdout, "Document %q has no environment share, nothing changed\n", documentID)
+		}
 	}
-	for _, cmd := range []*cobra.Command{unshareDocumentCmd, unshareNotebookCmd, unshareDashboardCmd} {
-		stability.MarkFlag(cmd, "environment", stability.Experimental, "0.42.0")
-	}
-
-	// New: may still change shape (output fields, fallback order) -- see
-	// AGENTS.md "Stability Tiers".
+	return nil
 }

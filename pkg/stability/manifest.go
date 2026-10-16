@@ -368,9 +368,10 @@ func collect(root *cobra.Command) []entry {
 				flag: f.name,
 				// The flag's own promise is capped by its command's: a stable
 				// flag on an experimental command is stable in name only.
-				level:    session.Weakest(e.level, f.level),
-				since:    f.since,
-				declared: f.declared,
+				level:       session.Weakest(e.level, f.level),
+				since:       f.since,
+				declared:    f.declared,
+				deprecation: f.deprecation,
 			})
 		})
 	})

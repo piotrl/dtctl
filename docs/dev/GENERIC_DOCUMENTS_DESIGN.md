@@ -77,8 +77,9 @@ dtctl unshare document <id> --user <user-sso-id>
 
 # Open any document to the whole environment: a claimable link, or public
 # (isPrivate=false). The two are independent; each unshare mode undoes one,
-# and `--environment link,public` asks for both. `apply --share-environment`
-# takes the same modes, with --share-access for the link level.
+# and `--environment link,public` asks for both. A document has at most one
+# link per access level, so a read and a read-write link coexist.
+# `apply --share-environment` (deprecated) does both halves.
 dtctl share document <id> --environment link [--access read|read-write]
 dtctl share document <id> --environment public
 dtctl unshare document <id> --environment link [--access read|read-write]

@@ -329,8 +329,9 @@ resources in sync with their file definitions.
 	c.Flags().StringArray("label", []string{}, "document classification label (repeatable); replaces the document's labels, overriding any in the payload (labels cannot be cleared, only replaced)")
 	c.Flags().Bool("create-snapshot", false, "snapshot the document's current state before updating it, so the previous version stays available via 'dtctl history'/'dtctl restore' (documents only)")
 	c.Flags().String("snapshot-description", "", "description for the snapshot created by --create-snapshot (max 128 characters)")
-	c.Flags().String("share-environment", "", "share the applied notebook/dashboard with everyone in the environment (values: 'read' or 'read-write'; bare --share-environment defaults to 'read')")
+	c.Flags().String("share-environment", "", "share the applied documents (dashboards, notebooks, launchpads, ...) with everyone in the environment: an environment share at this access level, and isPrivate=false (values: 'read' or 'read-write'; bare --share-environment defaults to 'read')")
 	c.Flags().Lookup("share-environment").NoOptDefVal = "read"
+	stability.DeprecateFlag(c, "share-environment", shareEnvironmentDeprecation)
 	stability.MarkStable(c)
 	markFlagRequiredNonEmpty(c, "file")
 	return c
@@ -351,7 +352,8 @@ func validateShareEnvironmentValue(v string) error {
 	}
 }
 
-// ensureEnvironmentShareForResults walks apply results and creates an environment share for every notebook/dashboard.
+// ensureEnvironmentShareForResults walks apply results and shares every document (dashboards,
+// notebooks, and documents of any other type such as launchpads) with the environment.
 // Other resource types are silently skipped — environment shares only apply to documents.
 //
 // Per-document failures do not abort the walk: we attempt a share for every eligible
@@ -401,14 +403,24 @@ func isDocumentApplyResult(r apply.ApplyResult) bool {
 	return false
 }
 
-// shareAppliedDocument does what --share-environment always did: an
+// shareAppliedDocument does what --share-environment always did, as
+// `share document --environment link,public --access <access>` does it: an
 // environment share at access, and isPrivate=false.
 func shareAppliedDocument(handler *document.Handler, id, access string) error {
-	if _, err := handler.EnsureEnvironmentLink(id, access, true); err != nil {
+	if _, err := handler.EnsureEnvironmentLink(id, access); err != nil {
 		return err
 	}
-	_, err := handler.SetPrivate(id, false)
-	return err
+	return handler.SetPrivate(id, false)
+}
+
+// shareEnvironmentDeprecation schedules --share-environment's removal. It
+// bundles two things that are not part of the document apply writes: an
+// environment share is a grant to other users, which belongs to `share`, and
+// isPrivate is a property of the document, which belongs in the applied file.
+var shareEnvironmentDeprecation = stability.Deprecation{
+	Since:       "0.44.0",
+	RemoveIn:    "0.46.0",
+	Replacement: "dtctl share document <id> --environment link,public",
 }
 
 // Declared stable: the invocation and output contract of this command is

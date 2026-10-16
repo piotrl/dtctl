@@ -130,10 +130,10 @@ combined with --user or --group:
   link    Create an environment share and print its link
           (https://<environment>/ui/document/v0/#share=<id>). Anyone in the
           environment who opens the link gets --access to the document. The
-          document's visibility is not changed. Re-running it reuses a share
-          at the same level. A share at another level is replaced only with an
-          explicit --access, which gives it a new link and breaks the old one;
-          without one the command fails and changes nothing.
+          document's visibility is not changed. A document has at most one
+          link per access level: re-running it prints the existing link at
+          that level, and a link at the other level is left alone, so a read
+          link and a read-write link can coexist.
   public  Mark the document public (isPrivate=false): everyone in the
           environment can find and read it. No share is created, and --access
           applies only to link.
@@ -351,7 +351,7 @@ func addShareFlags(c *cobra.Command) {
 	c.Flags().Bool("no-notify", false, "do not notify recipients of the share (a group recipient notifies every member)")
 	c.Flags().StringSlice("environment", nil, "open the document to everyone in the environment: 'link' (an environment share link, at --access), 'public' (isPrivate=false, read access), or both ('link,public'); cannot be combined with --user/--group")
 	stability.MarkFlag(c, "no-notify", stability.Experimental, "0.40.0")
-	stability.MarkFlag(c, "environment", stability.Experimental, "0.42.0")
+	stability.MarkFlag(c, "environment", stability.Experimental, "0.44.0")
 	// A blank recipient would be sent to the API as an empty SSO ID.
 	rejectEmptyFlag(c, "user")
 	rejectEmptyFlag(c, "group")
@@ -364,7 +364,7 @@ func addUnshareFlags(c *cobra.Command) {
 	c.Flags().Bool("all", false, "remove all user and group shares (add --environment link to delete the environment share too)")
 	c.Flags().String("access", "", "filter by access level: 'read' or 'read-write'")
 	c.Flags().StringSlice("environment", nil, "'link' deletes the environment share(s) (filtered by --access), 'public' makes the document private again; 'link,public' does both")
-	stability.MarkFlag(c, "environment", stability.Experimental, "0.42.0")
+	stability.MarkFlag(c, "environment", stability.Experimental, "0.44.0")
 	rejectEmptyFlag(c, "user")
 	rejectEmptyFlag(c, "group")
 }
@@ -464,7 +464,7 @@ func runShareDocument(cmd *cobra.Command, args []string) error {
 	}
 
 	if !environment.none() {
-		return shareWithEnvironment(cmd, cfg, handler, c.BaseURL(), documentID, access, environment)
+		return shareWithEnvironment(cmd, cfg, handler, c.BaseURL(), metadata.IsPrivate, documentID, access, environment)
 	}
 
 	// Check if a share already exists for this document with the same access level
@@ -511,20 +511,18 @@ func runShareDocument(cmd *cobra.Command, args []string) error {
 // shareWithEnvironment opens the document to the environment in the given
 // modes: the link first, so a failure to make the document public leaves the
 // narrower of the two in place. The link goes to stdout as a plain line, so it
-// can be captured, or into the result in agent mode.
-func shareWithEnvironment(cmd *cobra.Command, cfg *config.Config, handler *document.Handler, baseURL, documentID,
-	access string, modes environmentModes) error {
+// can be captured, or into the result in agent mode. isPrivate is the
+// document's current visibility, from the metadata the ownership check read.
+func shareWithEnvironment(cmd *cobra.Command, cfg *config.Config, handler *document.Handler, baseURL string,
+	isPrivate bool, documentID, access string, modes environmentModes) error {
 	ctx := cmdContext(cmd)
 	result := environmentShareResult{DocumentID: documentID}
-	var warnings []string
 
 	if modes.link {
-		// Only an explicit --access may replace a share at another level:
-		// that gives it a new ID and breaks every link already handed out.
-		replace := cmd.Flags().Changed("access")
-		res, err := handler.EnsureEnvironmentLink(documentID, access, replace)
+		res, err := handler.EnsureEnvironmentLink(documentID, access)
 		if err != nil {
-			return environmentLinkError(err, cfg, baseURL, documentID, access, "access", replace)
+			return environmentShareScopeError(err, cfg,
+				fmt.Sprintf("create an environment share for document %q", documentID), environmentShareCreateScopes)
 		}
 		result.Link = &environmentLinkResult{
 			ShareID: res.Share.ID,
@@ -532,33 +530,26 @@ func shareWithEnvironment(cmd *cobra.Command, cfg *config.Config, handler *docum
 			Created: res.Created,
 			URL:     document.ShareURL(baseURL, res.Share.ID),
 		}
-		for _, old := range res.Replaced {
-			warnings = append(warnings, fmt.Sprintf("replaced the %s environment share %s: links to it no longer work",
-				old.Level(), old.ID))
-		}
 	}
 
 	if modes.public {
-		changed, err := handler.SetPrivate(documentID, false)
-		if err != nil {
-			if result.Link != nil {
-				return fmt.Errorf("created the environment share link %s, but failed to make document %q public: %w",
-					result.Link.URL, documentID, err)
+		if isPrivate {
+			if err := handler.SetPrivate(documentID, false); err != nil {
+				err = visibilityError(err, documentID, "public")
+				if result.Link != nil {
+					return fmt.Errorf("created the environment share link %s, but %w", result.Link.URL, err)
+				}
+				return err
 			}
-			return fmt.Errorf("failed to make document %q public: %w", documentID, err)
 		}
-		result.Visibility = &environmentVisibilityResult{Public: true, Changed: changed}
+		result.Visibility = &environmentVisibilityResult{Public: true, Changed: isPrivate}
 	}
 
 	printer := newPrinterCtx(ctx)
-	if ap := enrichAgent(printer, "share", cmd.Name()); ap != nil {
-		ap.SetWarnings(warnings)
+	if enrichAgent(printer, "share", cmd.Name()) != nil {
 		return printer.Print(result)
 	}
 	stderr := currentStderr(ctx)
-	for _, w := range warnings {
-		output.FprintWarning(stderr, "%s", w)
-	}
 	if l := result.Link; l != nil {
 		if l.Created {
 			output.FprintSuccess(stderr, "Created %s environment share %s for document %q", l.Access, l.ShareID, documentID)
@@ -579,35 +570,29 @@ func shareWithEnvironment(cmd *cobra.Command, cfg *config.Config, handler *docum
 	return nil
 }
 
-// environmentLinkError explains why ensuring an environment share link failed:
-// a share at another level that the caller did not ask to replace, or a 403
-// for an environment-shares scope. accessFlag is the flag that sets the level
-// (--access on share, --share-access on apply); replace says whether it was
-// given, in which case a share at another level is deleted, which needs
-// :delete.
-func environmentLinkError(err error, cfg *config.Config, baseURL, documentID, access, accessFlag string, replace bool) error {
-	var existing *document.ExistingEnvironmentShareError
-	if errors.As(err, &existing) {
-		level := existing.Share.Level()
-		return &diagnostic.Error{
-			Operation: fmt.Sprintf("create a %s environment share for document %q", access, documentID),
-			Message:   fmt.Sprintf("it already has a %s environment share (%s); nothing was changed", level, existing.Share.ID),
-			Err:       err,
-			Suggestions: []string{
-				fmt.Sprintf("Reuse the existing %s link: pass --%s %s (%s)",
-					level, accessFlag, level, document.ShareURL(baseURL, existing.Share.ID)),
-				fmt.Sprintf("Replace it with a %s link: pass --%s %s explicitly; links to the existing share stop working",
-					access, accessFlag, access),
-			},
-		}
+// visibilityError explains a failed :makePublic / :makePrivate. Both are
+// owner-only, so a 403 most likely means the caller can write the document but
+// does not own it.
+func visibilityError(err error, documentID, visibility string) error {
+	var apiErr *httpclient.APIError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != 403 {
+		return err
 	}
-	scopes := []string{"document:environment-shares:read", "document:environment-shares:write"}
-	if replace {
-		scopes = append(scopes, "document:environment-shares:delete")
+	return &diagnostic.Error{
+		Operation:  fmt.Sprintf("make document %q %s", documentID, visibility),
+		StatusCode: apiErr.StatusCode,
+		Message:    "access denied: " + err.Error(),
+		Err:        err,
+		Suggestions: []string{
+			"Only the document's owner can change whether it is public (an admin can, too, on a ready-made document)",
+			fmt.Sprintf("Check the owner: dtctl describe document %s", documentID),
+		},
 	}
-	return environmentShareScopeError(err, cfg,
-		fmt.Sprintf("create an environment share for document %q", documentID), scopes)
 }
+
+// environmentShareCreateScopes are what `share --environment link` needs on
+// top of the document scopes.
+var environmentShareCreateScopes = []string{"document:environment-shares:read", "document:environment-shares:write"}
 
 // environmentShareDeleteScopes are what `unshare --environment link` needs on
 // top of the document scopes. OAuth sessions from before dtctl requested
@@ -706,7 +691,7 @@ func runUnshareDocument(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	if err := unshareFromEnvironment(ctx, cfg, handler, documentID, access, environment); err != nil {
+	if err := unshareFromEnvironment(ctx, cfg, handler, metadata.IsPrivate, documentID, access, environment); err != nil {
 		return err
 	}
 	if !direct {
@@ -763,19 +748,19 @@ func runUnshareDocument(cmd *cobra.Command, args []string) error {
 
 // unshareFromEnvironment undoes the given --environment modes. Private first:
 // isPrivate=false lets everyone read the document, a link only those who claim
-// it, so a failure partway leaves the narrower of the two.
-func unshareFromEnvironment(ctx context.Context, cfg *config.Config, handler *document.Handler, documentID, access string,
-	modes environmentModes) error {
+// it, so a failure partway leaves the narrower of the two. isPrivate is the
+// document's current visibility.
+func unshareFromEnvironment(ctx context.Context, cfg *config.Config, handler *document.Handler, isPrivate bool,
+	documentID, access string, modes environmentModes) error {
 	stdout, stderr := currentStdout(ctx), currentStderr(ctx)
 	if modes.public {
-		changed, err := handler.SetPrivate(documentID, true)
-		if err != nil {
-			return fmt.Errorf("failed to make document %q private: %w", documentID, err)
-		}
-		if changed {
-			output.FprintSuccess(stderr, "Document %q is private again", documentID)
-		} else {
+		if isPrivate {
 			fmt.Fprintf(stdout, "Document %q is already private\n", documentID)
+		} else {
+			if err := handler.SetPrivate(documentID, true); err != nil {
+				return visibilityError(err, documentID, "private")
+			}
+			output.FprintSuccess(stderr, "Document %q is private again", documentID)
 		}
 	}
 	if modes.link {

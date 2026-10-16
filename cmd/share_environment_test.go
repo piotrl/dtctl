@@ -22,7 +22,9 @@ type envShareServer struct {
 	mutations    []string
 	isPrivate    bool
 	deleteStatus int // non-zero: deleting an environment share fails with this status
-	shares       []map[string]any
+	// visibilityStatus non-zero: :makePublic / :makePrivate fail with this status
+	visibilityStatus int
+	shares           []map[string]any
 }
 
 func newEnvShareServer(t *testing.T) (*envShareServer, *httptest.Server) {
@@ -44,15 +46,18 @@ func newEnvShareServer(t *testing.T) (*envShareServer, *httptest.Server) {
 			"owner": "owner-1", "version": 4, "isPrivate": s.isPrivate,
 		})
 	})
-	mux.HandleFunc("/platform/document/v1/documents/lp-1", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPatch {
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			return
-		}
-		_ = r.ParseMultipartForm(1 << 20)
-		record("PATCH isPrivate=" + r.FormValue("isPrivate"))
-		w.WriteHeader(http.StatusOK)
-	})
+	for _, action := range []string{"makePublic", "makePrivate"} {
+		mux.HandleFunc("POST /platform/document/v1/documents/lp-1:"+action, func(w http.ResponseWriter, r *http.Request) {
+			record("POST :" + action)
+			if s.visibilityStatus != 0 {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(s.visibilityStatus)
+				_, _ = w.Write([]byte(`{"error":{"code":403,"message":"Forbidden"}}`))
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+		})
+	}
 	mux.HandleFunc("/platform/document/v1/environment-shares", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if r.Method == http.MethodGet {
@@ -179,40 +184,33 @@ func TestShareDocument_EnvironmentLinkAgent(t *testing.T) {
 	}
 }
 
-// TestShareDocument_EnvironmentLinkAtAnotherLevel: without an explicit
-// --access, an existing share at another level is neither reused (that would
-// hand out a read-write link to someone who asked for a read one) nor replaced
-// (that would break the links already handed out): the command fails, changes
-// nothing, and names both ways out. An explicit --access replaces it and warns
-// that the old link broke.
+// TestShareDocument_EnvironmentLinkAtAnotherLevel: a document can have one
+// environment share per access level, so a link at another level is neither
+// reused (that would hand out a read-write link to someone who asked for a
+// read one) nor replaced (that would break the links already handed out): a
+// second link is created next to it.
 func TestShareDocument_EnvironmentLinkAtAnotherLevel(t *testing.T) {
 	readWrite := []map[string]any{{"id": "env-share-1", "documentId": "lp-1", "access": []string{"read", "write"}}}
 
-	t.Run("bare re-run fails and changes nothing", func(t *testing.T) {
+	t.Run("another level gets a link of its own", func(t *testing.T) {
 		s, srv := newEnvShareServer(t)
 		s.shares = readWrite
 		setupDocumentCmdTest(t, srv.URL, config.SafetyLevelReadWriteAll)
 
-		stdout, _, err := runShareCmd(t, shareDocumentCmd, map[string]string{"environment": "link"})
-		if err == nil {
-			t.Fatal("expected an error")
+		stdout, stderr, err := runShareCmd(t, shareDocumentCmd, map[string]string{"environment": "link"})
+		if err != nil {
+			t.Fatalf("share document --environment link: %v", err)
 		}
-		for _, want := range []string{
-			"already has a read-write environment share (env-share-1)",
-			"pass --access read-write (" + srv.URL + "/ui/document/v0/#share=env-share-1)",
-			"pass --access read explicitly",
-		} {
-			if !strings.Contains(err.Error(), want) {
-				t.Errorf("error %q does not mention %q", err, want)
-			}
+		assertCalls(t, s, "POST environment-share lp-1 read")
+		if want := srv.URL + "/ui/document/v0/#share=env-share-2\n"; stdout != want {
+			t.Errorf("stdout = %q, want the new link %q", stdout, want)
 		}
-		if stdout != "" {
-			t.Errorf("stdout = %q, want no link", stdout)
+		if strings.Contains(stderr, "env-share-1") {
+			t.Errorf("stderr %q mentions the read-write share, which was left alone", stderr)
 		}
-		assertCalls(t, s, "")
 	})
 
-	t.Run("explicit --access at the existing level reuses it", func(t *testing.T) {
+	t.Run("the same level reuses it", func(t *testing.T) {
 		s, srv := newEnvShareServer(t)
 		s.shares = readWrite
 		setupDocumentCmdTest(t, srv.URL, config.SafetyLevelReadWriteAll)
@@ -224,24 +222,6 @@ func TestShareDocument_EnvironmentLinkAtAnotherLevel(t *testing.T) {
 		assertCalls(t, s, "")
 		if !strings.Contains(stdout, "#share=env-share-1") {
 			t.Errorf("stdout %q does not carry the existing link", stdout)
-		}
-	})
-
-	t.Run("explicit --access replaces it", func(t *testing.T) {
-		s, srv := newEnvShareServer(t)
-		s.shares = readWrite
-		setupDocumentCmdTest(t, srv.URL, config.SafetyLevelReadWriteAll)
-
-		stdout, stderr, err := runShareCmd(t, shareDocumentCmd, map[string]string{"environment": "link", "access": "read"})
-		if err != nil {
-			t.Fatalf("share document --environment link --access read: %v", err)
-		}
-		assertCalls(t, s, "DELETE /platform/document/v1/environment-shares/env-share-1\nPOST environment-share lp-1 read")
-		if !strings.Contains(stdout, "#share=env-share-2") {
-			t.Errorf("stdout %q does not carry the new link", stdout)
-		}
-		if !strings.Contains(stderr, "env-share-1: links to it no longer work") {
-			t.Errorf("stderr %q does not warn that the old link broke", stderr)
 		}
 	})
 }
@@ -257,7 +237,37 @@ func TestShareDocument_EnvironmentPublic(t *testing.T) {
 	if _, _, err := runShareCmd(t, shareDocumentCmd, map[string]string{"environment": "public"}); err != nil {
 		t.Fatalf("share document --environment public: %v", err)
 	}
-	assertCalls(t, s, "PATCH isPrivate=false")
+	assertCalls(t, s, "POST :makePublic")
+}
+
+// TestShareDocument_EnvironmentAlreadyPublic: the metadata the ownership check
+// read already says the document is public, so nothing is sent.
+func TestShareDocument_EnvironmentAlreadyPublic(t *testing.T) {
+	s, srv := newEnvShareServer(t)
+	setupDocumentCmdTest(t, srv.URL, config.SafetyLevelReadWriteAll)
+
+	_, stderr, err := runShareCmd(t, shareDocumentCmd, map[string]string{"environment": "public"})
+	if err != nil {
+		t.Fatalf("share document --environment public: %v", err)
+	}
+	assertCalls(t, s, "")
+	if !strings.Contains(stderr, "already public") {
+		t.Errorf("stderr %q does not say the document is already public", stderr)
+	}
+}
+
+// TestShareDocument_EnvironmentPublicNotOwner: :makePublic is owner-only, so a
+// 403 names the owner requirement.
+func TestShareDocument_EnvironmentPublicNotOwner(t *testing.T) {
+	s, srv := newEnvShareServer(t)
+	s.isPrivate = true
+	s.visibilityStatus = http.StatusForbidden
+	setupDocumentCmdTest(t, srv.URL, config.SafetyLevelReadWriteAll)
+
+	_, _, err := runShareCmd(t, shareDocumentCmd, map[string]string{"environment": "public"})
+	if err == nil || !strings.Contains(err.Error(), "Only the document's owner") {
+		t.Fatalf("error = %v, want one naming the owner requirement", err)
+	}
 }
 
 // TestShareDocument_EnvironmentLinkAndPublic: both modes at once create the
@@ -273,7 +283,7 @@ func TestShareDocument_EnvironmentLinkAndPublic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("share document --environment link,public: %v", err)
 	}
-	assertCalls(t, s, "POST environment-share lp-1 read\nPATCH isPrivate=false")
+	assertCalls(t, s, "POST environment-share lp-1 read\nPOST :makePublic")
 	if want := srv.URL + "/ui/document/v0/#share=env-share-2\n"; stdout != want {
 		t.Errorf("stdout = %q, want only the share link %q", stdout, want)
 	}
@@ -407,7 +417,24 @@ func TestUnshareDocument_EnvironmentPublic(t *testing.T) {
 	if _, _, err := runShareCmd(t, unshareDocumentCmd, map[string]string{"environment": "public"}); err != nil {
 		t.Fatalf("unshare document --environment public: %v", err)
 	}
-	assertCalls(t, s, "PATCH isPrivate=true")
+	assertCalls(t, s, "POST :makePrivate")
+}
+
+// TestUnshareDocument_EnvironmentAlreadyPrivate: a private document is left
+// alone and the command says so.
+func TestUnshareDocument_EnvironmentAlreadyPrivate(t *testing.T) {
+	s, srv := newEnvShareServer(t)
+	s.isPrivate = true
+	setupDocumentCmdTest(t, srv.URL, config.SafetyLevelReadWriteAll)
+
+	stdout, _, err := runShareCmd(t, unshareDocumentCmd, map[string]string{"environment": "public"})
+	if err != nil {
+		t.Fatalf("unshare document --environment public: %v", err)
+	}
+	assertCalls(t, s, "")
+	if !strings.Contains(stdout, "already private") {
+		t.Errorf("stdout %q does not say the document is already private", stdout)
+	}
 }
 
 // TestUnshareDocument_EnvironmentLinkAndPublic: both modes at once make the
@@ -420,7 +447,7 @@ func TestUnshareDocument_EnvironmentLinkAndPublic(t *testing.T) {
 	if _, _, err := runShareCmd(t, unshareDocumentCmd, map[string]string{"environment": "link,public"}); err != nil {
 		t.Fatalf("unshare document --environment link,public: %v", err)
 	}
-	assertCalls(t, s, "PATCH isPrivate=true\nDELETE /platform/document/v1/environment-shares/env-share-1")
+	assertCalls(t, s, "POST :makePrivate\nDELETE /platform/document/v1/environment-shares/env-share-1")
 }
 
 func TestUnshareDocument_EnvironmentRejectedInvocations(t *testing.T) {
@@ -464,7 +491,7 @@ func TestUnshareDocument_AllLeavesEnvironment(t *testing.T) {
 				"DELETE /platform/document/v1/direct-shares/direct-1"},
 		// --access filters the direct shares here, so it is not rejected.
 		{"--all --access read --environment public", map[string]string{"all": "true", "access": "read", "environment": "public"},
-			"PATCH isPrivate=true\nDELETE /platform/document/v1/direct-shares/direct-1"},
+			"POST :makePrivate\nDELETE /platform/document/v1/direct-shares/direct-1"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

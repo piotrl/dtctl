@@ -273,7 +273,7 @@ apply                                stable
   --label                            stable
   --no-hooks                         stable
   --set                              stable
-  --share-environment                stable
+  --share-environment                stable  deprecated 0.44.0 → remove 0.46.0, use `dtctl share document <id> --environment link,public`
   --show-diff                        stable
   --snapshot-description             stable
   --type                             stable
@@ -990,21 +990,21 @@ share                                stable
 share dashboard                      stable
   --access                           stable
   --dry-run                          stable
-  --environment                      experimental  since 0.42.0  (declared)
+  --environment                      experimental  since 0.44.0  (declared)
   --group                            stable
   --no-notify                        experimental  since 0.40.0  (declared)
   --user                             stable
 share document                       stable
   --access                           stable
   --dry-run                          stable
-  --environment                      experimental  since 0.42.0  (declared)
+  --environment                      experimental  since 0.44.0  (declared)
   --group                            stable
   --no-notify                        experimental  since 0.40.0  (declared)
   --user                             stable
 share notebook                       stable
   --access                           stable
   --dry-run                          stable
-  --environment                      experimental  since 0.42.0  (declared)
+  --environment                      experimental  since 0.44.0  (declared)
   --group                            stable
   --no-notify                        experimental  since 0.40.0  (declared)
   --user                             stable
@@ -1033,21 +1033,21 @@ unshare dashboard                    stable
   --access                           stable
   --all                              stable
   --dry-run                          stable
-  --environment                      experimental  since 0.42.0  (declared)
+  --environment                      experimental  since 0.44.0  (declared)
   --group                            stable
   --user                             stable
 unshare document                     stable
   --access                           stable
   --all                              stable
   --dry-run                          stable
-  --environment                      experimental  since 0.42.0  (declared)
+  --environment                      experimental  since 0.44.0  (declared)
   --group                            stable
   --user                             stable
 unshare notebook                     stable
   --access                           stable
   --all                              stable
   --dry-run                          stable
-  --environment                      experimental  since 0.42.0  (declared)
+  --environment                      experimental  since 0.44.0  (declared)
   --group                            stable
   --user                             stable
 update                               stable

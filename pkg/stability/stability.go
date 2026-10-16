@@ -85,7 +85,7 @@ const (
 	AnnotationDeprecatedReplacement = "dtctl.io/deprecated-replacement"
 )
 
-// Deprecation describes a stable command's scheduled removal.
+// Deprecation describes a stable command's or flag's scheduled removal.
 type Deprecation struct {
 	// Since is the dtctl version that deprecated the command.
 	Since string
@@ -200,6 +200,69 @@ func Deprecate(cmd *cobra.Command, d Deprecation) {
 	setAnnotation(cmd, AnnotationDeprecatedSince, d.Since)
 	setAnnotation(cmd, AnnotationDeprecatedRemoveIn, d.RemoveIn)
 	setAnnotation(cmd, AnnotationDeprecatedReplacement, d.Replacement)
+}
+
+// DeprecateFlag records a flag's scheduled removal, the flag-level
+// counterpart of Deprecate: the record goes into the manifest and through the
+// same window check in Lint. It also marks the flag deprecated in pflag, which
+// is what hides it from help, warns when it is used, and lets
+// DTCTL_NO_DEPRECATED refuse it. Like Deprecate it leaves the level alone.
+func DeprecateFlag(cmd *cobra.Command, name string, d Deprecation) {
+	if cmd == nil {
+		return
+	}
+	f := cmd.Flags().Lookup(name)
+	if f == nil {
+		return
+	}
+	if f.Annotations == nil {
+		f.Annotations = map[string][]string{}
+	}
+	for key, value := range map[string]string{
+		AnnotationDeprecatedSince:       d.Since,
+		AnnotationDeprecatedRemoveIn:    d.RemoveIn,
+		AnnotationDeprecatedReplacement: d.Replacement,
+	} {
+		if value != "" {
+			f.Annotations[key] = []string{value}
+		}
+	}
+	// pflag words its warning as "Flag --x has been deprecated, <message>",
+	// so the message leaves out the "deprecated since" clause Note leads with.
+	message := strings.TrimPrefix(strings.TrimPrefix(d.Note(), "deprecated since "+d.Since), "deprecated")
+	message = strings.TrimPrefix(message, "; ")
+	if message == "" {
+		message = "it will be removed"
+	}
+	_ = cmd.Flags().MarkDeprecated(name, message)
+}
+
+// FlagDeprecationOf returns a flag's deprecation record, and false when
+// DeprecateFlag did not record one.
+func FlagDeprecationOf(cmd *cobra.Command, name string) (Deprecation, bool) {
+	if cmd == nil {
+		return Deprecation{}, false
+	}
+	f := cmd.Flags().Lookup(name)
+	if f == nil {
+		return Deprecation{}, false
+	}
+	return flagDeprecation(f.Annotations)
+}
+
+func flagDeprecation(annotations map[string][]string) (Deprecation, bool) {
+	first := func(key string) string {
+		if v := annotations[key]; len(v) > 0 {
+			return v[0]
+		}
+		return ""
+	}
+	d := Deprecation{
+		Since:       first(AnnotationDeprecatedSince),
+		RemoveIn:    first(AnnotationDeprecatedRemoveIn),
+		Replacement: first(AnnotationDeprecatedReplacement),
+	}
+	return d, d.Since != "" || d.RemoveIn != ""
 }
 
 // Of returns a command's own declared level, ignoring its ancestors. Absence of
@@ -499,6 +562,9 @@ func Lint(root *cobra.Command) []error {
 
 		effective := Effective(cmd)
 		visitFlags(cmd, func(f flagInfo) {
+			if f.deprecation != nil {
+				problems = append(problems, deprecationProblems(path+" --"+f.name, *f.deprecation)...)
+			}
 			// Only an *explicit* declaration can be inconsistent. An
 			// unannotated flag has no opinion of its own and simply inherits
 			// the command's level — otherwise every flag on an experimental
@@ -590,6 +656,8 @@ type flagInfo struct {
 	// things to the lint.
 	declared bool
 	hidden   bool
+	// deprecation is the DeprecateFlag record, nil when there is none.
+	deprecation *Deprecation
 }
 
 // visitFlags invokes fn for each of a command's local (non-inherited) flags.
@@ -600,12 +668,16 @@ func visitFlags(cmd *cobra.Command, fn func(flagInfo)) {
 		if cmd.InheritedFlags().Lookup(f.Name) != nil {
 			return
 		}
-		fn(flagInfo{
+		info := flagInfo{
 			name:     f.Name,
 			level:    flagLevel(f.Annotations),
 			since:    flagSince(f.Annotations),
 			declared: len(f.Annotations[AnnotationLevel]) > 0,
 			hidden:   f.Hidden,
-		})
+		}
+		if d, ok := flagDeprecation(f.Annotations); ok {
+			info.deprecation = &d
+		}
+		fn(info)
 	})
 }

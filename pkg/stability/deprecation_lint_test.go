@@ -96,3 +96,46 @@ func TestDeprecationDoesNotChangeTheTier(t *testing.T) {
 	require.Equal(t, Stable, Of(cmd))
 	require.Equal(t, Stable, Effective(cmd))
 }
+
+// A flag deprecation is held to the same window as a command's, shows up on
+// the flag's manifest line, and is a pflag deprecation too, which is what
+// hides the flag from help and lets DTCTL_NO_DEPRECATED refuse it.
+func TestDeprecateFlag(t *testing.T) {
+	newTree := func(d Deprecation) (*cobra.Command, *cobra.Command) {
+		root := &cobra.Command{Use: "dtctl"}
+		child := &cobra.Command{Use: "apply", RunE: func(*cobra.Command, []string) error { return nil }}
+		child.Flags().String("share", "", "")
+		MarkStable(child)
+		DeprecateFlag(child, "share", d)
+		root.AddCommand(child)
+		return root, child
+	}
+
+	t.Run("a complete record", func(t *testing.T) {
+		root, child := newTree(Deprecation{Since: "0.39.0", RemoveIn: "0.41.0", Replacement: "share document"})
+		require.Empty(t, Lint(root))
+
+		f := child.Flags().Lookup("share")
+		require.Equal(t, "removal planned in 0.41.0; use `share document` instead", f.Deprecated)
+		require.True(t, f.Hidden)
+		require.Equal(t, Undeclared, OfFlag(child, "share"), "a deprecation is not a demotion: the flag still inherits its command's tier")
+
+		d, ok := FlagDeprecationOf(child, "share")
+		require.True(t, ok)
+		require.Equal(t, "0.41.0", d.RemoveIn)
+
+		require.Contains(t, Manifest(root),
+			"  --share  stable  deprecated 0.39.0 → remove 0.41.0, use `share document`")
+	})
+
+	t.Run("a window that is too short", func(t *testing.T) {
+		root, _ := newTree(Deprecation{Since: "0.39.0", RemoveIn: "0.40.0"})
+		var found []string
+		for _, err := range Lint(root) {
+			found = append(found, err.Error())
+		}
+		joined := strings.Join(found, "\n")
+		require.Contains(t, joined, "apply --share: deprecated in 0.39.0")
+		require.Contains(t, joined, "at least 2 minor releases after the deprecation")
+	})
+}

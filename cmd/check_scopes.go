@@ -285,13 +285,12 @@ var flagScopeRequirements = map[string]map[string][]string{
 
 	// --environment link (alone or in link,public) works on environment
 	// shares, a second API next to the documents one: share lists and creates
-	// them (replacing one at another access level also deletes, but only with
-	// an explicit --access, so :delete is not listed), unshare lists and
-	// deletes them. --environment public only sets the document's isPrivate
-	// flag, which the documents scopes cover.
-	"share document":    {"environment=link": {"document:environment-shares:read", "document:environment-shares:write"}},
-	"share dashboard":   {"environment=link": {"document:environment-shares:read", "document:environment-shares:write"}},
-	"share notebook":    {"environment=link": {"document:environment-shares:read", "document:environment-shares:write"}},
+	// them (a share at another access level is left alone, so it never
+	// deletes), unshare lists and deletes them. --environment public only
+	// changes the document's visibility, which the documents scopes cover.
+	"share document":    {"environment=link": environmentShareCreateScopes},
+	"share dashboard":   {"environment=link": environmentShareCreateScopes},
+	"share notebook":    {"environment=link": environmentShareCreateScopes},
 	"unshare document":  {"environment=link": environmentShareDeleteScopes},
 	"unshare dashboard": {"environment=link": environmentShareDeleteScopes},
 	"unshare notebook":  {"environment=link": environmentShareDeleteScopes},

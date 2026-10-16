@@ -6,21 +6,24 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
 	"github.com/dynatrace-oss/dtctl/pkg/apply"
 	"github.com/dynatrace-oss/dtctl/pkg/client"
 	"github.com/dynatrace-oss/dtctl/pkg/resources/document"
+	"github.com/dynatrace-oss/dtctl/pkg/stability"
 )
 
 // newEnvShareMock builds an httptest server that mocks the minimal Document
-// Service endpoints required by EnsureEnvironmentShare. It returns deterministic
+// Service endpoints `apply --share-environment` touches. It returns deterministic
 // behaviour per documentID so tests can drive success/failure paths without a
 // real API. `fail` is the set of document IDs whose POST should return a 500.
 func newEnvShareMock(t *testing.T, fail map[string]bool) (*httptest.Server, map[string]*int64) {
 	t.Helper()
 	counts := map[string]*int64{}
+	var mu sync.Mutex
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/platform/document/v1/environment-shares", func(w http.ResponseWriter, r *http.Request) {
@@ -37,10 +40,12 @@ func newEnvShareMock(t *testing.T, fail map[string]bool) (*httptest.Server, map[
 				http.Error(w, `{"error":"boom"}`, http.StatusInternalServerError)
 				return
 			}
+			mu.Lock()
 			if _, ok := counts[body.DocumentID]; !ok {
 				var n int64
 				counts[body.DocumentID] = &n
 			}
+			mu.Unlock()
 			atomic.AddInt64(counts[body.DocumentID], 1)
 			_ = json.NewEncoder(w).Encode(document.EnvironmentShare{
 				ID: "share-" + body.DocumentID, DocumentID: body.DocumentID, Access: []string{"read"},
@@ -48,18 +53,25 @@ func newEnvShareMock(t *testing.T, fail map[string]bool) (*httptest.Server, map[
 		}
 	})
 
-	// Metadata + isPrivate PATCH (needed by EnsureEnvironmentShare when a share is created).
+	// :makePublic, counted under "public:<id>". --share-environment sends it
+	// without reading the document's metadata first: the action does nothing
+	// when the document is already public.
 	mux.HandleFunc("/platform/document/v1/documents/", func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, "/metadata") {
-			w.Header().Set("Content-Type", "application/json")
-			id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/platform/document/v1/documents/"), "/metadata")
-			_ = json.NewEncoder(w).Encode(document.DocumentMetadata{ID: id, Name: "doc", Type: "notebook", Version: 1, IsPrivate: true})
+		id, ok := strings.CutSuffix(strings.TrimPrefix(r.URL.Path, "/platform/document/v1/documents/"), ":makePublic")
+		if r.Method != http.MethodPost || !ok {
+			t.Errorf("unexpected document request %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
-		if r.Method == http.MethodPatch {
-			w.WriteHeader(http.StatusOK)
-			return
+		mu.Lock()
+		key := "public:" + id
+		if _, ok := counts[key]; !ok {
+			var n int64
+			counts[key] = &n
 		}
+		mu.Unlock()
+		atomic.AddInt64(counts[key], 1)
+		w.WriteHeader(http.StatusNoContent)
 	})
 
 	return httptest.NewServer(mux), counts
@@ -84,9 +96,16 @@ func TestEnsureEnvironmentShareForResults_SkipsNonDocuments(t *testing.T) {
 		&apply.WorkflowApplyResult{ApplyResultBase: apply.ApplyResultBase{ID: "wf-1", ResourceType: "workflow"}},
 		&apply.SLOApplyResult{ApplyResultBase: apply.ApplyResultBase{ID: "slo-1", ResourceType: "slo"}},
 		&apply.DashboardApplyResult{ApplyResultBase: apply.ApplyResultBase{ID: "db-1", ResourceType: "dashboard"}},
+		&apply.DocumentApplyResult{ApplyResultBase: apply.ApplyResultBase{ID: "lp-1", ResourceType: "launchpad"}},
 	}
 	if err := ensureEnvironmentShareForResults(context.Background(), c, results, "read"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	// Both halves, for every document type: the link and isPrivate=false.
+	for _, key := range []string{"nb-1", "public:nb-1", "db-1", "public:db-1", "lp-1", "public:lp-1"} {
+		if got := counts[key]; got == nil || atomic.LoadInt64(got) != 1 {
+			t.Errorf("expected %s once, counts=%v", key, counts)
+		}
 	}
 	if got := counts["nb-1"]; got == nil || atomic.LoadInt64(got) != 1 {
 		t.Errorf("expected notebook nb-1 to be shared once, counts=%v", counts)
@@ -199,5 +218,29 @@ func TestApplyCmd_ShareEnvironmentFlagValidation(t *testing.T) {
 				t.Fatalf("validateShareEnvironmentValue(%q) error = %v, wantErr %v", tt.value, err, tt.wantErr)
 			}
 		})
+	}
+}
+
+// TestApplyCmd_ShareEnvironmentDeprecated: --share-environment keeps its
+// shape (a string, bare means 'read') and carries a complete deprecation
+// record naming the replacement, which hides it from help and lets
+// DTCTL_NO_DEPRECATED refuse it.
+func TestApplyCmd_ShareEnvironmentDeprecated(t *testing.T) {
+	f := applyCmd.Flags().Lookup("share-environment")
+	if f == nil {
+		t.Fatal("--share-environment flag not registered")
+	}
+	if f.Value.Type() != "string" || f.NoOptDefVal != "read" {
+		t.Errorf("flag shape = %s (bare %q), want string with bare 'read' as on main", f.Value.Type(), f.NoOptDefVal)
+	}
+	d, ok := stability.FlagDeprecationOf(applyCmd, "share-environment")
+	if !ok {
+		t.Fatal("--share-environment carries no deprecation record")
+	}
+	if d.Since == "" || d.RemoveIn == "" || !strings.Contains(d.Replacement, "share document") {
+		t.Errorf("deprecation = %+v, want since, remove-in, and the share document replacement", d)
+	}
+	if f.Deprecated == "" || !f.Hidden {
+		t.Errorf("flag is not deprecated in pflag (deprecated %q, hidden %v)", f.Deprecated, f.Hidden)
 	}
 }
